@@ -1,0 +1,553 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+import sqlite3
+import json
+import plotly.graph_objects as go
+import os
+
+# Configuration de la page
+st.set_page_config(
+    page_title="Suivi d'Entraînement",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Programme d'entraînement
+WORKOUT_PROGRAM = {
+    'PUSH (Lundi)': {
+        'echauffement': ['Tapis (5 min)', 'Élastique'],
+        'exercices': [
+            'Pec deck - 2 séries',
+            'Développé couché machine convergente - 3 séries',
+            'Biceps corde à la poulie (prise marteau) - 3 séries',
+            'Décliné à la machine convergente - 2 séries',
+            'Curl biceps unilatéral poulie - 3 séries',
+            'Dips - 3 séries',
+            'Curl biceps machine - 3 séries',
+            'Développé militaire machine - 3 séries',
+            'Élévation frontale haltère - 3 séries',
+            'Élévation latérale machine - 3 séries'
+        ],
+        'finisher': 'Tapis (20 min de marche)'
+    },
+    'PULL (Mardi)': {
+        'echauffement': ['Tapis (5 min)', 'Élastique'],
+        'exercices': [
+            'Tirage vertical - 3 séries',
+            'Tirage vertical (prise serrée) - 3 séries',
+            'Extension triceps unilatéral poulie haute - 3 séries',
+            'Tirage horizontal (coude levé, arrière d\'épaule) - 3 séries',
+            'Tirage horizontal (coude collé) - 3 séries',
+            'Extension triceps nuque poulie - 3 séries',
+            'Extension triceps unilatéral poulie (prise marteau) - 3 séries'
+        ],
+        'finisher': 'Tapis (20 min de marche)'
+    },
+    'LEG (Mercredi)': {
+        'echauffement': ['Vélo (10 min)', 'Échauffement cheville, genou, hanche'],
+        'exercices': [
+            'Leg extension unilatéral - 4 séries',
+            'Belt squat - 3 séries',
+            'Hip thrust - 3 séries',
+            'Presse - 3 séries',
+            'Abdos - 3 séries',
+            'Lombaires - 3 séries'
+        ],
+        'finisher': 'Tapis (20 min de marche)'
+    },
+    'PUSH (Jeudi)': {
+        'echauffement': ['Tapis (5 min)', 'Élastique'],
+        'exercices': [
+            'Pec deck - 3 séries',
+            'Curl biceps machine - 3 séries',
+            'Développé incliné machine convergente - 4 séries',
+            'Curl biceps (prise marteau) - 4 séries',
+            'Dips - 3 séries',
+            'Développé militaire haltères - 3 séries',
+            'Élévation frontale haltère - 3 séries',
+            'Élévation latérale poulie - 3 séries'
+        ],
+        'finisher': 'Tapis (20 min de marche)'
+    },
+    'PULL (Vendredi)': {
+        'echauffement': ['Tapis (5 min)', 'Élastique'],
+        'exercices': [
+            'Tirage vertical unilatéral - 3 séries',
+            'Extension triceps unilatéral poulie - 3 séries',
+            'Tirage horizontal (prise marteau) - 3 séries',
+            'Extension triceps nuque poulie - 3 séries',
+            'Oiseau à la machine - 3 séries',
+            'Extension triceps à la poulie vis-à-vis - 3 séries'
+        ],
+        'finisher': 'Tapis (20 min de marche)'
+    },
+    'LEG (Samedi)': {
+        'echauffement': ['Vélo (10 min)', 'Échauffement cheville, genou, hanche'],
+        'exercices': [
+            'Leg extension - 3 séries',
+            'Presse - 3 séries',
+            'Fentes - 3 séries',
+            'Ischios - 4 séries',
+            'Hip thrust - 3 séries',
+            'Abdos - 3 séries',
+            'Lombaires - 3 séries'
+        ],
+        'finisher': 'Tapis (20 min de marche)'
+    }
+}
+
+def init_database():
+    try:
+        conn = sqlite3.connect('workout.db')
+        c = conn.cursor()
+        
+        # Table des séances
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                session_type TEXT NOT NULL
+            )
+        ''')
+        
+        # Table des exercices avec la colonne notes
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS exercises (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                exercise_name TEXT NOT NULL,
+                set_number INTEGER NOT NULL,
+                reps INTEGER NOT NULL,
+                weight REAL NOT NULL,
+                notes TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        ''')
+        
+        # Table des activités d'échauffement
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS warmup_activities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                activity_name TEXT NOT NULL,
+                duration INTEGER NOT NULL,
+                notes TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        ''')
+        
+        # Table des activités de finisher
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS finisher_activities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                activity_name TEXT NOT NULL,
+                duration INTEGER NOT NULL,
+                notes TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            )
+        ''')
+        
+        conn.commit()
+    except Exception as e:
+        st.error(f"Erreur lors de l'initialisation de la base de données : {str(e)}")
+    finally:
+        conn.close()
+
+# Initialisation de la base de données au démarrage
+init_database()
+
+def save_session(session_type, exercises_data, warmup_data, finisher_data):
+    session_id = None
+    try:
+        conn = sqlite3.connect('workout.db')
+        c = conn.cursor()
+        
+        # Enregistrer la séance
+        c.execute('INSERT INTO sessions (date, session_type) VALUES (?, ?)',
+                  (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), session_type))
+        session_id = c.lastrowid
+        
+        # Enregistrer les activités d'échauffement
+        for activity in warmup_data:
+            c.execute('''
+                INSERT INTO warmup_activities (session_id, activity_name, duration, notes)
+                VALUES (?, ?, ?, ?)
+            ''', (session_id, activity['name'], activity['duration'], activity.get('notes', '')))
+        
+        # Enregistrer les exercices
+        for exercise in exercises_data:
+            c.execute('''
+                INSERT INTO exercises (session_id, exercise_name, set_number, reps, weight, notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (session_id, exercise['name'], exercise['set'], exercise['reps'],
+                  exercise['weight'], exercise.get('notes', '')))
+        
+        # Enregistrer l'activité de finisher
+        if finisher_data:
+            c.execute('''
+                INSERT INTO finisher_activities (session_id, activity_name, duration, notes)
+                VALUES (?, ?, ?, ?)
+            ''', (session_id, finisher_data['name'], finisher_data['duration'], finisher_data.get('notes', '')))
+        
+        conn.commit()
+        return session_id
+    except Exception as e:
+        st.error(f"Erreur lors de l'enregistrement de la séance : {str(e)}")
+        return None
+    finally:
+        conn.close()
+
+def get_sessions_history(days_filter=30, session_type=None):
+    try:
+        conn = sqlite3.connect('workout.db')
+        
+        # Construction de la requête de base
+        query = """
+            SELECT 
+                s.id,
+                s.date,
+                s.session_type,
+                COUNT(DISTINCT e.exercise_name) as nb_exercises,
+                SUM(e.reps * e.weight) as total_volume
+            FROM sessions s
+            LEFT JOIN exercises e ON s.id = e.session_id
+        """
+        
+        # Ajout des conditions WHERE si nécessaire
+        conditions = []
+        params = []
+        
+        if days_filter:
+            conditions.append("date(s.date) >= date('now', ?)")
+            params.append(f'-{days_filter} days')
+        
+        if session_type:
+            conditions.append("s.session_type = ?")
+            params.append(session_type)
+        
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        # Groupement et tri
+        query += " GROUP BY s.id, s.date, s.session_type ORDER BY s.date DESC"
+        
+        # Exécution de la requête principale
+        df = pd.read_sql_query(query, conn, params=params)
+        
+        # Si nous avons des résultats, récupérer les détails des exercices pour chaque session
+        if not df.empty:
+            df['date'] = pd.to_datetime(df['date'])
+            
+            # Récupérer les exercices pour chaque session
+            for idx, row in df.iterrows():
+                # Requête pour les exercices
+                exercise_query = """
+                    SELECT exercise_name, COUNT(*) as sets_count
+                    FROM exercises
+                    WHERE session_id = ?
+                    GROUP BY exercise_name
+                """
+                exercises_df = pd.read_sql_query(exercise_query, conn, params=[row['id']])
+                df.at[idx, 'exercises'] = ', '.join([
+                    f"{row['exercise_name']} ({row['sets_count']} séries)"
+                    for _, row in exercises_df.iterrows()
+                ])
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération de l'historique des séances : {str(e)}")
+    finally:
+        conn.close()
+    return df
+
+def get_exercise_max_weight(exercise_name):
+    try:
+        conn = sqlite3.connect('workout.db')
+        # Récupérer le poids max et le nombre de répétitions maximum à ce poids
+        query = """
+            SELECT weight, MAX(reps) as max_reps
+            FROM exercises
+            WHERE exercise_name = ?
+            GROUP BY weight
+            ORDER BY weight DESC
+            LIMIT 1
+        """
+        cursor = conn.cursor()
+        cursor.execute(query, (exercise_name,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return {'max_weight': result[0], 'max_reps': result[1]}
+        return None
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération du poids max : {str(e)}")
+        return None
+
+# Onglets principaux
+tab_workout, tab_history = st.tabs([" Entraînement", " Historique"])
+
+with tab_workout:
+    st.title("Nouvelle Séance")
+    
+    # Sélection de la séance
+    session_type = st.selectbox(
+        "Choisir la séance",
+        options=list(WORKOUT_PROGRAM.keys())
+    )
+    
+    if session_type:
+        workout = WORKOUT_PROGRAM[session_type]
+        
+        # Afficher les détails du programme
+        with st.expander("Détails du programme", expanded=True):
+            st.subheader("Échauffement")
+            for item in workout['echauffement']:
+                st.write(f"• {item}")
+            
+            st.subheader("Exercices")
+            for item in workout['exercices']:
+                st.write(f"• {item}")
+            
+            st.subheader("Finisher")
+            st.write(f"• {workout['finisher']}")
+        
+        # Bouton de validation
+        if st.button("Commencer la séance"):
+            st.session_state['workout_started'] = True
+            st.session_state['current_workout'] = workout
+            st.rerun()
+    
+    if st.session_state.get('workout_started', False):
+        workout = st.session_state['current_workout']
+        
+        # Suivi de l'échauffement
+        st.subheader("Échauffement")
+        warmup_data = []
+        for activity in workout['echauffement']:
+            with st.expander(f" {activity}", expanded=True):
+                default_time = int(activity.split('(')[1].split()[0]) if '(' in activity else 5
+                duration = st.number_input(f"Durée (minutes)", 
+                                        min_value=1, 
+                                        value=default_time,
+                                        key=f"warmup_{activity}")
+                notes = st.text_input("Notes", key=f"warmup_notes_{activity}")
+                warmup_data.append({
+                    'name': activity,
+                    'duration': duration,
+                    'notes': notes
+                })
+        
+        # Suivi des exercices
+        st.subheader("Exercices")
+        exercises_data = []
+        
+        # Initialiser la structure des séries dans session_state si ce n'est pas déjà fait
+        if 'series_count' not in st.session_state:
+            st.session_state.series_count = {}
+            st.session_state.exercises_data = {}
+        
+        for idx, exercise in enumerate(workout['exercices'], 1):
+            exercise_name = exercise.split(' - ')[0]
+            num_sets = int(exercise.split(' - ')[1].split()[0])
+            
+            # Créer un style CSS personnalisé pour le titre de l'exercice
+            st.markdown(f"""
+                <div style='
+                    background-color: #1E1E1E;
+                    padding: 10px;
+                    border-radius: 5px;
+                    margin-bottom: 5px;
+                '>
+                    <h3 style='
+                        color: white;
+                        margin: 0;
+                        font-size: 1.5em;
+                    '>
+                        Exercice {idx} - {exercise_name} ({num_sets} séries)
+                    </h3>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            with st.expander("", expanded=True):
+                # Afficher le poids max historique en haut de l'exercice
+                max_data = get_exercise_max_weight(exercise_name)
+                if max_data:
+                    st.markdown(
+                        f"""<div style='background-color: rgba(255,0,0,0.1); 
+                        padding: 5px; border-radius: 5px; margin-bottom: 10px;'>
+                        <span style='color: #ff6b6b;'>
+                        Record: {max_data['max_weight']} kg ({max_data['max_reps']} reps)
+                        </span></div>""",
+                        unsafe_allow_html=True
+                    )
+                
+                # Initialiser le compteur de séries pour cet exercice si nécessaire
+                if exercise_name not in st.session_state.series_count:
+                    st.session_state.series_count[exercise_name] = num_sets
+                    st.session_state.exercises_data[exercise_name] = []
+                
+                # Boutons pour ajouter/supprimer des séries
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.button(f"➕ Ajouter une série", key=f"add_{exercise_name}"):
+                        st.session_state.series_count[exercise_name] += 1
+                        st.rerun()
+                with col_btn2:
+                    if st.button(f"➖ Supprimer une série", key=f"remove_{exercise_name}") and st.session_state.series_count[exercise_name] > 1:
+                        st.session_state.series_count[exercise_name] -= 1
+                        st.session_state.exercises_data[exercise_name] = st.session_state.exercises_data[exercise_name][:st.session_state.series_count[exercise_name]]
+                        st.rerun()
+                
+                # Afficher les séries actuelles
+                for set_num in range(1, st.session_state.series_count[exercise_name] + 1):
+                    st.markdown(f"**Série {set_num}**")
+                    
+                    # Vérifier si cette série a déjà été validée
+                    set_data = None
+                    if len(st.session_state.exercises_data[exercise_name]) >= set_num:
+                        set_data = st.session_state.exercises_data[exercise_name][set_num - 1]
+                    
+                    if not set_data:
+                        col1, col2, col3, col4 = st.columns([1, 1, 2, 0.5])
+                        with col1:
+                            reps = st.number_input("Répétitions", 
+                                                min_value=0,
+                                                value=None,
+                                                placeholder="Reps",
+                                                key=f"{exercise_name}_set_{set_num}_reps")
+                        with col2:
+                            weight = st.number_input("Poids (kg)", 
+                                                  min_value=0.0,
+                                                  value=None,
+                                                  placeholder="Kg",
+                                                  step=0.5,
+                                                  key=f"{exercise_name}_set_{set_num}_weight")
+                        with col3:
+                            notes = st.text_input("Notes",
+                                              key=f"{exercise_name}_set_{set_num}_notes")
+                        with col4:
+                            if st.button("✓", key=f"validate_{exercise_name}_set_{set_num}"):
+                                if reps and weight:
+                                    new_set_data = {
+                                        'name': exercise_name,
+                                        'set': set_num,
+                                        'reps': reps,
+                                        'weight': weight,
+                                        'notes': notes
+                                    }
+                                    while len(st.session_state.exercises_data[exercise_name]) < set_num:
+                                        st.session_state.exercises_data[exercise_name].append(None)
+                                    st.session_state.exercises_data[exercise_name][set_num - 1] = new_set_data
+                                    exercises_data.append(new_set_data)
+                                    st.rerun()
+                                else:
+                                    st.error("Reps et poids requis")
+                    else:
+                        # Afficher les données validées
+                        col1, col2, col3, col4 = st.columns([1, 1, 2, 0.5])
+                        with col1:
+                            st.write(f"Reps: {set_data['reps']}")
+                        with col2:
+                            st.write(f"Poids: {set_data['weight']} kg")
+                        with col3:
+                            if set_data.get('notes'):
+                                st.write(f"Notes: {set_data['notes']}")
+                        with col4:
+                            if st.button("🔄", key=f"reset_{exercise_name}_set_{set_num}"):
+                                st.session_state.exercises_data[exercise_name][set_num - 1] = None
+                                st.rerun()
+        
+        # Suivi du finisher
+        st.subheader("Finisher")
+        with st.expander(f" {workout['finisher']}", expanded=True):
+            default_time = int(workout['finisher'].split('(')[1].split()[0]) if '(' in workout['finisher'] else 20
+            finisher_duration = st.number_input(f"Durée (minutes)", 
+                                              min_value=1, 
+                                              value=default_time,
+                                              key="finisher_duration")
+            finisher_notes = st.text_input("Notes", key="finisher_notes")
+            finisher_data = {
+                'name': workout['finisher'],
+                'duration': finisher_duration,
+                'notes': finisher_notes
+            }
+        
+        # Bouton de sauvegarde
+        if st.button("Sauvegarder la séance"):
+            # Rassembler toutes les données validées
+            all_exercises_data = []
+            for exercise_data in st.session_state.exercises_data.values():
+                all_exercises_data.extend([set_data for set_data in exercise_data if set_data])
+            
+            if not all_exercises_data:
+                st.error("Aucun exercice n'a été validé. Veuillez valider au moins un exercice avant de sauvegarder.")
+            else:
+                session_id = save_session(session_type, all_exercises_data, warmup_data, finisher_data)
+                if session_id:
+                    st.success(f"Séance sauvegardée avec succès !")
+                    # Réinitialiser tous les états
+                    for key in list(st.session_state.keys()):
+                        if key in ['series_count', 'exercises_data', 'workout_started']:
+                            del st.session_state[key]
+                    st.rerun()
+
+with tab_history:
+    st.title("Historique des Séances")
+    
+    # Filtres
+    col_filter1, col_filter2 = st.columns(2)
+    with col_filter1:
+        days_filter = st.selectbox(
+            "Période",
+            options=[7, 14, 30, 90, 180, 365],
+            format_func=lambda x: f"Derniers {x} jours",
+            index=2  # 30 jours par défaut
+        )
+    
+    with col_filter2:
+        session_type = st.selectbox(
+            "Type de séance",
+            options=[None] + list(WORKOUT_PROGRAM.keys()),
+            format_func=lambda x: "Toutes les séances" if x is None else x
+        )
+    
+    # Récupération et affichage de l'historique
+    sessions_df = get_sessions_history(days_filter, session_type)
+    
+    if not sessions_df.empty:
+        # Vue d'ensemble
+        st.subheader("Vue d'ensemble")
+        col_stats1, col_stats2, col_stats3 = st.columns(3)
+        
+        with col_stats1:
+            st.metric("Nombre de séances", len(sessions_df))
+        
+        with col_stats2:
+            total_volume = sessions_df['total_volume'].sum()
+            st.metric("Volume total", f"{total_volume:,.0f} kg")
+        
+        with col_stats3:
+            avg_sessions = len(sessions_df) / (days_filter/7)
+            st.metric("Moyenne séances/semaine", f"{avg_sessions:.1f}")
+        
+        # Détail des séances
+        st.subheader("Détail des séances")
+        for _, session in sessions_df.iterrows():
+            with st.expander(f"{session['date'].strftime('%d/%m/%Y')} - {session['session_type']}", expanded=False):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Exercices:**")
+                    if session['exercises']:
+                        for exercise in session['exercises'].split(','):
+                            st.write(f"• {exercise.strip()}")
+                    else:
+                        st.write("Aucun exercice enregistré")
+                
+                with col2:
+                    st.metric("Nombre d'exercices", session['nb_exercises'])
+                    if pd.notnull(session['total_volume']):
+                        st.metric("Volume total", f"{session['total_volume']:.1f} kg")
+    else:
+        st.info("Aucune séance trouvée pour la période sélectionnée.")
